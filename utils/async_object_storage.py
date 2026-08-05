@@ -15,8 +15,8 @@ from botocore.exceptions import ClientError
 class AsyncObjectStorage:
     def __init__(self, *, key_id: str, secret: str, endpoint: str, container: str):
         self._auth = {
-            "aws_access_key_id": key_id,
-            "aws_secret_access_key": secret,
+            "aws_access_key_id": key_id, # логин
+            "aws_secret_access_key": secret, # пароль
             "endpoint_url": endpoint,
         }
         self._bucket = container

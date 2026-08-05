@@ -1,0 +1,33 @@
+services:
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    ports:
+      - "19000:9000"
+      - "19001:9001"
+    environment:
+      MINIO_ROOT_USER: admin
+      MINIO_ROOT_PASSWORD: admin123
+    volumes:
+      - minio_data:/data
+    networks:
+      - minio_net
+
+  caddy:
+    image: caddy:latest
+    ports:
+      - "8443:8443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - ./certs:/etc/caddy/certs:ro
+      - caddy_data:/data
+    networks:
+      - minio_net
+
+volumes:
+  minio_data:
+  caddy_data:
+
+networks:
+  minio_net:
+    driver: bridge
