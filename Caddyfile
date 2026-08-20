@@ -1,46 +1,26 @@
 {
-    # Отключаем автоматический HTTPS (мы используем свои сертификаты)
     auto_https off
-    # Логи для отладки
+
     log {
         level DEBUG
     }
 }
 
-# MinIO Console на порту 8443
 :8443 {
-    # Указываем путь к сертификату и ключу
-    tls /etc/caddy/certs/cert.pem /etc/caddy/certs/key.pem
-    
-    # Обработка WebSocket соединений (важно для консоли)
-    handle /ws/* {
-        reverse_proxy minio:9001 {
-            # WebSocket настройки
-            flush_interval -1
-            header_up Upgrade {http.request.header.Upgrade}
-            header_up Connection {http.request.header.Connection}
-            header_up Host {upstream_hostport}
-            header_up X-Forwarded-Proto https
-            header_up X-Forwarded-For {remote_host}
-        }
+    log {
+        output stdout
+        format json
     }
-    
-    # Основной прокси для всего остального
+
+    tls /etc/caddy/certs/cert.pem /etc/caddy/certs/key.pem
+
     reverse_proxy minio:9001 {
-        
-        # Заголовки для корректной работы
-        header_up Host {upstream_hostport}
-        header_up X-Forwarded-Proto https
-        header_up X-Forwarded-For {remote_host}
-        header_up X-Real-IP {remote_host}
+        transport http {
+            versions 1.1
+            read_timeout 0
+            write_timeout 0
+        }
+
+        flush_interval -1
     }
 }
-
-# API на другом порту внутри той же сети
-# :8444 {
-#     tls /etc/caddy/certs/cert.pem /etc/caddy/certs/key.pem
-#     reverse_proxy minio:9000 {
-#         header_up Host {upstream_hostport}
-#         header_up X-Forwarded-Proto https
-#     }
-# }

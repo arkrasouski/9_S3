@@ -2,31 +2,47 @@ services:
   minio:
     image: minio/minio:latest
     command: server /data --console-address ":9001"
+
     ports:
       - "19000:9000"
       - "19001:9001"
+
+    env_file:
+      - ./.env
+
     environment:
-      MINIO_ROOT_USER: admin
-      MINIO_ROOT_PASSWORD: admin123
+      MINIO_ROOT_USER: "${MINIO_USER}"
+      MINIO_ROOT_PASSWORD: "${MINIO_PASSWORD}"
+      MINIO_BROWSER_REDIRECT_URL: "https://${WSL_IP}:8443"
+
     volumes:
       - minio_data:/data
+
     networks:
       - minio_net
 
   caddy:
     image: caddy:latest
+
     ports:
       - "8443:8443"
+
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - ./certs:/etc/caddy/certs:ro
       - caddy_data:/data
+      - caddy_config:/config
+
+    depends_on:
+      - minio
+
     networks:
       - minio_net
 
 volumes:
   minio_data:
   caddy_data:
+  caddy_config:
 
 networks:
   minio_net:
