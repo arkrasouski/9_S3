@@ -5,6 +5,7 @@ from pathlib import Path
 
 # Для создания асинхронного контекстного менеджера
 from contextlib import asynccontextmanager
+from typing import Union
 
 # Асинхронная версия boto3
 from aiobotocore.session import get_session
@@ -33,17 +34,18 @@ class AsyncObjectStorage:
         async with self._session.create_client("s3", **self._auth) as connection:
             yield connection # yield превращает функцию в генератор, который работает как контекстный менеджер
 
-    async def send_file(self, local_source: str):
+    async def send_file(self, local_source: Union[str, Path], prefix: str = None):
         """
         Загружает файлы из локальной файловой системы в бакет
         """
         file_ref = Path(local_source)
-        target_name = file_ref.name
+        file_name = file_ref.name
+        target_name = Path(prefix) / file_name if prefix else file_name
         async with self._connect() as remote:
             with file_ref.open("rb") as binary_data:
                 await remote.put_object(
                     Bucket=self._bucket,
-                    Key=target_name,
+                    Key=str(target_name),
                     Body=binary_data
                 )
 
@@ -129,37 +131,195 @@ class AsyncObjectStorage:
                 print(f"Бакет {self._bucket} не имеет политики или она не найдена: {e}")
                 return None
 
-    def set_write_policy_to_user(self, admin_client: MinioAdmin, user_name: str):
-            policy = {
-                "Version": "2012-10-17",
-                "Statement": [
+    def set_write_policy_to_user(self, admin_client: MinioAdmin, user_name: str) -> None:
+        """
+        Устанавливает политику для записи, удаления и чтения отдельного файла, а также просмотра списка файлов в бакете
+
+        :param MinioAdmin admin_client: Готовый объект с кредами администратора для запуска команды передачи прав
+        :param str user_name: Имя пользователя бакета для передачи прав
+        """
+            
+        policy = {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Effect": "Allow",
+                    "Action": [
+                        "s3:PutObject",
+                        "s3:GetObject",
+                        "s3:DeleteObject",
+                        "s3:ListBucket"
+                    ],
+                    "Resource": [
+                        f"arn:aws:s3:::{self._bucket}",
+                        f"arn:aws:s3:::{self._bucket}/*"
+                    ]
+                }
+            ]
+        }
+
+        try:
+            admin_client.policy_add(
+                "write-policy",
+                policy=policy
+            )
+
+            # Назначить пользователю
+            admin_client.policy_set(
+                'write-policy',
+                user=user_name
+            )
+            print(f"Политика записи успешно применена к бакету: {self._bucket} для пользователя: {user_name}")
+        except Exception as e:
+            print(f"Ошибка при установке политики: {e}")
+
+    async def enable_versioning(self):
+        """Включает версионирование в бакете."""
+        async with self._connect() as remote:
+            try:
+                await remote.put_bucket_versioning(
+                    Bucket=self._bucket,
+                    VersioningConfiguration={
+                        'Status': 'Enabled'
+                    }
+                )
+                print(f"Версионирование включено для бакета: {self._bucket}")
+                return True
+            except Exception as e:
+                print(f"Ошибка при включении версионирования: {e}")
+                return False
+
+    async def _list_object_versions(self, remote_name: str) -> list[str]:
+        """
+        Получает список всех версий объекта
+        
+        :param str remote_name: Имя файла в бакете
+
+        :rtype: list[str]
+        :return: Список id версий файла
+        """
+        async with self._connect() as client:
+            try:
+                response = await client.list_object_versions(
+                    Bucket=self._bucket,
+                    Prefix=remote_name
+                )
+                
+                versions = response.get('Versions', [])
+                
+                if not versions:
+                    print(f"Версий объекта '{remote_name}' не найдено")
+                    return []
+                
+                print(f"\n📋 Список версий для '{remote_name}':")
+                return versions
+            except Exception as e:
+                print(f"❌ Ошибка при получении списка версий: {e}")
+                return []
+
+    async def _download_version(self, remote_name: str, version_id: str) -> bytes:
+        """
+        Скачивает конкретную версию файла
+
+        :param str remote_name: Имя файла в бакете
+        :param str version_id: id версии файла
+
+        :rtype: bytes
+        :return: Содержимое файла в бинарном формате
+        """
+        async with self._connect() as client:
+            try:
+                response = await client.get_object(
+                    Bucket=self._bucket,
+                    Key=remote_name,
+                    VersionId=version_id
+                )
+                
+                content = await response['Body'].read()
+                return content
+            
+            except Exception as e:
+                print(f"Ошибка при скачивании версии: {e}")
+                return None
+
+    async def download_previous_version(self, remote_name: str, local_target: str) -> None:
+        """
+        Скачивает предыдущую версию файла.
+        
+        :param str remote_name: Имя файла в бакете
+        :param str local_target: Путь для скачивания файла
+
+        :rtype: bytes
+        :return: Содержимое файла в бинарном формате
+        """
+        #Получаем список всех версий объекта
+        versions = await self._list_object_versions(remote_name)
+
+        if not versions or len(versions) < 2:
+            print("Предыдущей версии не найдено (нужно как минимум 2 версии)")
+            return None
+
+        #Выбираем "предыдущую" версию.
+        #В списке versions[0] — самая новая (последняя).
+        #versions[1] — это предыдущая перед ней.
+        previous_version = versions[1]
+        previous_version_id = previous_version['VersionId']
+
+        print(f"Найдена предыдущая версия с ID: {previous_version_id}")
+
+        content = await self._download_version(remote_name, previous_version_id)
+        with open(local_target, "wb") as out:
+            out.write(content)
+
+    async def set_lifecycle_policy(self, days: int = 3) -> bool:
+        """
+        Устанавливает lifecycle policy для автоматического удаления объектов
+        
+        :param int days: Количество дней, после которых объекты будут удалены
+
+        :rtype: bool
+        :return: Флаг успешности изменения политики удаления старых данных
+        """
+        async with self._connect() as client:
+            # Создаем lifecycle конфигурацию
+            lifecycle_config = {
+                'Rules': [
                     {
-                        "Effect": "Allow",
-                        "Action": [
-                            "s3:PutObject",
-                            "s3:GetObject",
-                            "s3:DeleteObject",
-                            "s3:ListBucket"
-                        ],
-                        "Resource": [
-                            f"arn:aws:s3:::{self._bucket}",
-                            f"arn:aws:s3:::{self._bucket}/*"
-                        ]
+                        'ID': 'auto-delete-after-3-days',  # Уникальный идентификатор правила
+                        'Status': 'Enabled',  # Правило активно
+                        'Filter': {
+                            'Prefix': ''  # Применяется ко всем объектам в бакете
+                        },
+                        'Expiration': {
+                            'Days': days,  # Удалять через указанное количество дней
+                        }
                     }
                 ]
             }
-
+            
             try:
-                admin_client.policy_add(
-                    "write-policy",
-                    policy=policy
+                # Применяем lifecycle policy
+                await client.put_bucket_lifecycle_configuration(
+                    Bucket=self._bucket,
+                    LifecycleConfiguration=lifecycle_config
                 )
-
-                # Назначить пользователю
-                admin_client.policy_set(
-                    'write-policy',
-                    user=user_name
-                )
-                print(f"Политика записи успешно применена к бакету: {self._bucket} для пользователя: {user_name}")
+                print(f"Lifecycle policy успешно применена к бакету: {self._bucket}")
+                print(f"Объекты будут автоматически удаляться через {days} дня(ей)")
+                return True
             except Exception as e:
-                print(f"Ошибка при установке политики: {e}")
+                print(f"Ошибка при установке lifecycle policy: {e}")
+                return False
+
+    async def get_lifecycle_policy(self) -> dict | None:
+        """Получает текущую lifecycle policy бакета"""
+        async with self._connect() as client:
+            try:
+                response = await client.get_bucket_lifecycle_configuration(
+                    Bucket=self._bucket
+                )
+                print("Текущая Lifecycle Policy:")
+                print(json.dumps(response, indent=2, default=str))
+                return response
+            except Exception as e:
+                print(f"Lifecycle policy не найдена или ошибка: {e}")
+                return None
